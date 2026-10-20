@@ -1,0 +1,8 @@
+---
+# Einstellungen für den Betrieb im Container (ohne systemd und journald).
+# Das Backend ruft diese Befehle per sudo auf (siehe /etc/sudoers.d/ciphermail-backend).
+ciphermail:
+  postfix:
+    control-command: '/usr/local/sbin/cm-postfix-control'
+  journalctl:
+    command: '/usr/local/sbin/cm-journalctl'

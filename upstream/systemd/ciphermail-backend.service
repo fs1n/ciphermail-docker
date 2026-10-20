@@ -1,0 +1,51 @@
+# Ansible managed
+
+[Unit]
+Description=CipherMail back-end
+Documentation=https://www.ciphermail.com/documentation
+After=network.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=simple
+
+SyslogIdentifier=ciphermail-backend
+
+User=ciphermail-backend
+Group=ciphermail-backend
+
+LogsDirectory=ciphermail
+RuntimeDirectory=ciphermail
+WorkingDirectory=/opt/ciphermail/backend
+
+ExecStartPre=+/bin/mkdir -p /var/opt/ciphermail/ciphermail-jms-data
+ExecStartPre=+/bin/chown -R ciphermail-backend /var/opt/ciphermail/
+ExecStartPre=+/bin/chmod 750 /var/opt/ciphermail/
+ExecStartPre=+/bin/chown -R ciphermail-backend /etc/ciphermail/pki/tls/private
+ExecStartPre=+/bin/chmod 750 /etc/ciphermail/pki/tls/private
+ExecStartPre=+/bin/rm -f /run/ciphermail-backend-restart-required
+
+ExecStart=/usr/bin/java \
+-XX:MaxRAMPercentage=40 \
+--add-opens=java.base/java.security=ALL-UNNAMED \
+-cp '/opt/ciphermail/backend/lib/*' \
+"-Dciphermail.config.home=/etc/ciphermail" \
+"-Dspring.profiles.active=" \
+"-Dciphermail.var.home=/var/opt/ciphermail" \
+"-Dserver.address=127.0.0.1" \
+"-Dspring.config.location=classpath:/application.yml,optional:/etc/ciphermail/spring.config.d/*/" \
+"-Dciphermail.stats.filename=/var/log/ciphermail/ciphermail-stats.log" \
+"-Dnetworkaddress.cache.ttl=300" \
+"-Dmail.mime.parameters.strict=false" \
+"-Dmail.mime.decodetext.strict=false" \
+"-Dsun.jnu.encoding=UTF-8" \
+"-Dfile.encoding=UTF-8" \
+"-Dciphermail.smime.outlook-2010-ski-workaround-enable=false" \
+"-Dorg.bouncycastle.x509.allow_absent_equiv_NULL=true" \
+com.ciphermail.james.CipherMailBackendMain
+
+Restart=on-failure
+
+PrivateTmp=true

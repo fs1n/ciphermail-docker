@@ -1,0 +1,38 @@
+#!/bin/bash
+#
+# Startet ciphermail-portal-backend wie /usr/lib/systemd/system/ciphermail-portal-backend.service.
+# Vorlage: upstream/systemd/ciphermail-portal-backend.service. Ändert sich die Unit in einer neuen
+# CipherMail-Version, bricht der Image-Build ab; dann dieses Skript und die Vorlage nachziehen.
+
+set -euo pipefail
+. /usr/local/lib/ciphermail-docker/service.sh
+
+USER_NAME=ciphermail-backend
+
+# SyslogIdentifier=
+service_log ciphermail-portal-backend
+
+# ExecStartPre=+ (als root). Das setfacl auf /run/systemd/ask-password entfällt:
+# ohne systemd gibt es keine Passwortabfrage über systemd-ask-password.
+rm -f /run/ciphermail-portal-backend-restart-required
+
+# EnvironmentFile= (schreibt cm-entrypoint)
+service_env_file /etc/ciphermail/env/portal-backend.env
+
+# WorkingDirectory=
+cd /opt/ciphermail/portal
+
+# ExecStart=
+service_exec "$USER_NAME" /usr/bin/java \
+    -XX:MaxRAMPercentage=20 \
+    -cp '/opt/ciphermail/portal/lib/*' \
+    "-Dciphermail.config.home=/etc/ciphermail" \
+    "-Dspring.profiles.active=" \
+    "-Dserver.address=127.0.0.1" \
+    "-Dspring.config.location=classpath:/application.yml,optional:/etc/ciphermail/portal.spring.config.d/*/" \
+    "-Dnetworkaddress.cache.ttl=300" \
+    "-Dmail.mime.parameters.strict=false" \
+    "-Dmail.mime.decodetext.strict=false" \
+    "-Dsun.jnu.encoding=UTF-8" \
+    "-Dfile.encoding=UTF-8" \
+    com.ciphermail.portal.PortalApplication

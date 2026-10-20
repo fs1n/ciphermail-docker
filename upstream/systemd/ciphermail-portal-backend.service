@@ -1,0 +1,41 @@
+# Ansible managed
+
+[Unit]
+Description=CipherMail portal back-end
+Documentation=https://www.ciphermail.com/documentation
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=simple
+
+SyslogIdentifier=ciphermail-portal-backend
+
+User=ciphermail-backend
+Group=ciphermail-backend
+
+WorkingDirectory=/opt/ciphermail/portal
+
+EnvironmentFile=/etc/ciphermail/env/portal-backend.env
+
+ExecStartPre=+/bin/rm -f /run/ciphermail-portal-backend-restart-required
+ExecStartPre=+/usr/bin/setfacl -m u:ciphermail-backend:wx /run/systemd/ask-password
+
+ExecStart=/usr/bin/java \
+-XX:MaxRAMPercentage=20 \
+-cp '/opt/ciphermail/portal/lib/*' \
+"-Dciphermail.config.home=/etc/ciphermail" \
+"-Dspring.profiles.active=" \
+"-Dserver.address=127.0.0.1" \
+"-Dspring.config.location=classpath:/application.yml,optional:/etc/ciphermail/portal.spring.config.d/*/" \
+"-Dnetworkaddress.cache.ttl=300" \
+"-Dmail.mime.parameters.strict=false" \
+"-Dmail.mime.decodetext.strict=false" \
+"-Dsun.jnu.encoding=UTF-8" \
+"-Dfile.encoding=UTF-8" \
+com.ciphermail.portal.PortalApplication
+
+Restart=on-failure
+
+PrivateTmp=true

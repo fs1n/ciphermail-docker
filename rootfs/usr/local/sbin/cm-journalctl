@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# journalctl-Ersatz für den Log-Viewer im Admin-UI (wird als /usr/bin/journalctl installiert).
+# journalctl-Ersatz für den Log-Viewer im Admin-UI (per ciphermail.journalctl.command eingestellt).
 # Das Backend ruft z.B. auf:
 #   sudo journalctl --unit=postfix --output=json --output-fields=MESSAGE,SYSLOG_IDENTIFIER,PRIORITY
 #                   --reverse --grep=foo --lines=1000 --since=... --until=...

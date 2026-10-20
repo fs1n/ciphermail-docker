@@ -1,78 +1,56 @@
 #!/bin/bash
 #
-# systemctl-Ersatz (wird als /usr/bin/systemctl installiert). Die CipherMail-Skripte
-# cm-postfix-ctl.sh, cm-postfix-map.sh und cm-system.sh rufen nur
-#   systemctl start|stop|restart|status|reload <dienst>
-# auf. Das wird auf supervisorctl abgebildet. Alles andere (daemon-reload, enable, ...)
-# ist ohne systemd bedeutungslos und endet mit 0.
+# Minimales systemctl (installiert als /usr/bin/systemctl, im Image gibt es kein systemd).
+#
+# Nur noch nötig für zwei Skripte der Pakete, die systemctl fest aufrufen und sich nicht
+# per Konfiguration umstellen lassen:
+#   cm-system.sh       systemctl status <dienst>   (läuft der Dienst?)
+#   cm-postfix-map.sh  systemctl reload postfix    (nach Änderung einer Map)
+# sowie für "systemctl daemon-reload" in den postinst-Skripten beim Image-Build.
+# Postfix-Start/-Stop des Backends geht über cm-postfix-control, nicht hierüber.
 
 action=
 units=()
 for a in "$@"; do
     case $a in
-        -*) ;;  # --no-pager, --quiet usw.
+        -*) ;;
         *) if [[ -z $action ]]; then action=$a; else units+=("$a"); fi ;;
     esac
 done
 
 # postfix@-.service, postfix.service -> postfix
-name() {
-    local u=${1%.service}
-    u=${u%%@*}
-    echo "$u"
-}
-
-sc() { supervisorctl -c /etc/supervisor/supervisord.conf "$@"; }
+name() { local u=${1%.service}; echo "${u%%@*}"; }
 
 running() {
-    sc status "$1" 2>/dev/null | grep -q ' RUNNING '
+    supervisorctl -c /etc/supervisor/supervisord.conf status "$1" 2>/dev/null | grep -q ' RUNNING '
 }
-
-supervisor_up() { [[ -S /run/supervisor.sock ]]; }
 
 rc=0
 case $action in
-    start|stop|restart)
-        supervisor_up || exit 0   # z.B. postinst während docker build
-        for u in "${units[@]}"; do sc "$action" "$(name "$u")" || rc=1; done
-        ;;
-    try-restart|condrestart)
-        for u in "${units[@]}"; do
-            n=$(name "$u"); running "$n" && { sc restart "$n" || rc=1; }
-        done
-        ;;
-    reload|reload-or-restart|try-reload-or-restart|force-reload)
+    status|is-active)
         for u in "${units[@]}"; do
             n=$(name "$u")
-            case $n in
+            if running "$n"; then
+                [[ $action == is-active ]] && echo active || echo "$n: running"
+            else
+                [[ $action == is-active ]] && echo inactive || echo "$n: not running"
+                rc=3
+            fi
+        done
+        ;;
+    reload)
+        for u in "${units[@]}"; do
+            case $(name "$u") in
                 postfix) /usr/sbin/postfix reload || rc=1 ;;
-                apache2) /usr/sbin/apache2ctl graceful || rc=1 ;;
-                *) sc restart "$n" || rc=1 ;;
+                *) echo "systemctl reload $u: im Container nicht unterstützt" >&2; rc=1 ;;
             esac
         done
         ;;
-    status)
-        for u in "${units[@]}"; do
-            n=$(name "$u")
-            sc status "$n" 2>/dev/null
-            running "$n" || rc=3
-        done
-        ;;
-    is-active)
-        for u in "${units[@]}"; do
-            if running "$(name "$u")"; then echo active; else echo inactive; rc=3; fi
-        done
-        ;;
-    is-failed)
-        rc=1
-        for u in "${units[@]}"; do
-            if sc status "$(name "$u")" 2>/dev/null | grep -qE ' (FATAL|BACKOFF|EXITED) '; then echo failed; rc=0; else echo active; fi
-        done
-        ;;
-    is-enabled)
-        for u in "${units[@]}"; do echo enabled; done
+    daemon-reload|enable|disable|mask|unmask|preset)
         ;;
     *)
+        echo "systemctl $action: im Container nicht unterstützt (kein systemd)" >&2
+        rc=1
         ;;
 esac
 exit $rc

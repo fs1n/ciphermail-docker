@@ -1,0 +1,29 @@
+#!/bin/bash
+#
+# Postfix-Steuerung für das Backend im Container (statt cm-postfix-ctl.sh, das systemctl aufruft).
+# Eingestellt über ciphermail.postfix.control-command in
+# /etc/ciphermail/spring.config.d/container/application.yml, Aufruf per sudo.
+# Gleiche Schnittstelle wie cm-postfix-ctl.sh: start | stop | restart | status | running
+
+set -uo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+sc() { supervisorctl -c /etc/supervisor/supervisord.conf "$@"; }
+
+case ${1:-} in
+    start|stop|restart)
+        sc "$1" postfix
+        ;;
+    status)
+        # Exit-Code > 0, wenn Postfix nicht läuft (wie systemctl status)
+        sc status postfix
+        postfix status
+        ;;
+    running)
+        if postfix status >/dev/null 2>&1; then echo true; else echo false; fi
+        ;;
+    *)
+        echo "Aufruf: $(basename "$0") (start | stop | restart | status | running)" >&2
+        exit 1
+        ;;
+esac

@@ -25,22 +25,32 @@ Version per Build-Argument `CM_REF` (Release-Tag, Standard `6.5.0`).
 
 ## Aufbau
 
-Im Container gibt es kein systemd. Die Pakete erwarten es aber: das Backend ruft über sudo
-`cm-postfix-ctl.sh`, `cm-postfix-map.sh`, `cm-system.sh` (die wiederum `systemctl` aufrufen)
-und `journalctl` für den Log-Viewer auf. Darum:
+Im Container gibt es kein systemd und kein journald. CipherMail ist für eine VM damit gebaut:
+die systemd-Units starten die Java-Dienste, und das Backend ruft über sudo Skripte auf, die
+`systemctl` und `journalctl` verwenden. Wo CipherMail es per Konfiguration erlaubt, wird das
+umgestellt statt nachgebaut:
 
-- **supervisord** startet Postfix, beide Backends, Apache und `cm-bootstrap`
-  (`rootfs/etc/supervisor/supervisord.conf`).
-- **`cm-run-unit`** liest beim Start die systemd-Unit aus dem Paket
-  (`/usr/lib/systemd/system/ciphermail-*.service`): `User`, `ExecStartPre`, `ExecStart`
-  (mehrzeilig), `EnvironmentFile`, `RuntimeDirectory`, `LogsDirectory`. Neue Paketversionen
-  laufen so ohne Anpassung. Fehler in `ExecStartPre` werden nur gemeldet (z.B. `setfacl` auf
-  `/run/systemd/ask-password`, das es ohne systemd nicht gibt).
-- **`/usr/bin/systemctl`** ist `cm-systemctl`: `start|stop|restart|status|is-active` gehen an
-  supervisorctl, `reload postfix` an `postfix reload`, der Rest endet mit 0.
-- **`/usr/bin/journalctl`** ist `cm-journalctl`. `cm-journal` schreibt jede Logzeile auf stdout
-  (`docker logs`) und zusätzlich als JSON nach `/var/log/ciphermail/journal/<dienst>.jsonl`
-  (max. 2 × 20 MB pro Dienst, `CM_JOURNAL_MAX_MB`). Daraus liest der Log-Viewer im Admin-UI.
+| Aufgabe | Auf der VM | Im Container |
+|---------|-----------|--------------|
+| Dienste starten | systemd-Units | supervisord + `cm-start-backend`, `cm-start-portal-backend` |
+| Postfix start/stop/restart aus dem Admin-UI | `cm-postfix-ctl.sh` → systemctl | `cm-postfix-control` (`ciphermail.postfix.control-command`) |
+| Log-Viewer im Admin-UI | `journalctl` | `cm-journalctl` (`ciphermail.journalctl.command`) |
+| Map-Änderung → `systemctl reload postfix` | systemd | minimales `/usr/bin/systemctl` |
+| `cm-system.sh` → `systemctl status` | systemd | minimales `/usr/bin/systemctl` |
+
+Die Umstellung steht in `rootfs/etc/ciphermail/spring.config.d/container/application.yml`.
+`cm-postfix-map.sh` und `cm-system.sh` rufen `systemctl` fest auf; dafür bleibt ein kleines
+`systemctl` (`cm-systemctl`), das nur `status`, `is-active` und `reload postfix` kann.
+
+- **Startbefehle:** `cm-start-backend` und `cm-start-portal-backend` enthalten dieselben
+  Befehle wie die systemd-Units der Pakete. Die Units liegen als Vorlage in `upstream/systemd/`.
+  Ändert eine neue CipherMail-Version eine Unit, bricht der Build mit einem Diff ab. Dann die
+  Startskripte anpassen und die Vorlage aktualisieren.
+- **Postfix:** `cm-postfix` statt `postfix start-fg`, weil der Master ohne PID 1 in einer eigenen
+  Session läuft und supervisord ihn sonst nicht stoppen kann.
+- **Logs:** `cm-journal` schreibt jede Logzeile auf stdout (`docker logs`) und zusätzlich als
+  JSON nach `/var/log/ciphermail/journal/<dienst>.jsonl` (max. 2 × 20 MB pro Dienst,
+  `CM_JOURNAL_MAX_MB`). Daraus liest `cm-journalctl` für den Log-Viewer.
 - **`cm-entrypoint`** bei jedem Start: Postfix-Volume befüllen, TLS-Zertifikate, DB-Konfiguration,
   DB-Schema (nur bei leerer DB), `cli`-Konto (Passwort bei jedem Start neu), Portal-Konfiguration.
 - **`cm-bootstrap`** sobald das Backend antwortet: Rolle und Konto `portal`, beim ersten Start
@@ -62,6 +72,26 @@ und `journalctl` für den Log-Viewer auf. Darum:
 
 Alle Passwörter gehen auch als Datei: `DB_PASSWORD_FILE`, `ADMIN_PASSWORD_FILE`,
 `CLI_PASSWORD_FILE`, `PORTAL_PASSWORD_FILE` (z.B. `/run/secrets/db_password`).
+
+## Konfiguration ändern
+
+Neue Werte in `.env` gelten erst, wenn der Container neu erstellt wird
+(`docker compose up -d`; ein `restart` behält die alte Umgebung). Gemountete Dateien
+(Zertifikate, `*_FILE`) liest jeder Start neu.
+
+| Änderung | Wirkung beim nächsten Start |
+|----------|-----------------------------|
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_JDBC_PARAMS` | übernommen |
+| `DB_PASSWORD` | übernommen, aber nur auf CipherMail-Seite: das Passwort in PostgreSQL selbst zuerst ändern (`ALTER ROLE ciphermail PASSWORD '…'`). Das `POSTGRES_PASSWORD` im Compose wirkt nur beim allerersten Start der DB. |
+| `POSTFIX_TLS_FILE`, `UI_TLS_CERT_FILE`, `UI_TLS_KEY_FILE` | übernommen (Datei wird jedes Mal kopiert bzw. eingetragen). Variable entfernen lässt das zuletzt kopierte Postfix-Zertifikat stehen. |
+| `CLI_PASSWORD`, `PORTAL_PASSWORD` | übernommen (werden ohnehin bei jedem Start gesetzt) |
+| `TZ`, `JAVA_TOOL_OPTIONS` | übernommen |
+| `ADMIN_PASSWORD` | **ignoriert**, sobald der Admin existiert. Passwort im Admin-UI oder mit `ciphermail-cli auth admin password` ändern. |
+| `MYHOSTNAME` | **ignoriert** nach dem ersten Start. Im Admin-UI (MTA-Einstellungen) ändern, dort gehört es CipherMail. |
+
+Absicht dahinter: Was CipherMail im Admin-UI verwaltet (Admins, Postfix-Einstellungen), wird
+vom Container nie überschrieben. Was nur der Container kennt (DB-Zugang, Zertifikate,
+Maschinenkonten), schreibt er bei jedem Start neu.
 
 ## Persistente Daten
 
@@ -90,8 +120,9 @@ Aufrufe der CLI im Container: `docker compose exec ciphermail ciphermail-cli sys
 
 Mit 6.5.0 (Build und Betrieb mit Compose): leere DB und zweiter Start, Login im Admin-UI,
 Portal, Mail über Port 25 durch den Content-Filter und zurück (10025 → 10026),
-`cm-postfix-ctl.sh restart|stop|start` und `postfix reload` über sudo wie aus dem Backend,
-Log-Viewer für MTA, Backend und Portal, Healthcheck.
+Postfix start/stop/restart, Map anlegen und ändern (mit Reload), Postfix-Hauptkonfiguration
+über die CipherMail-CLI (gleiche REST-API wie das Admin-UI), `cm-system.sh`, Log-Viewer für
+MTA, Backend und Portal, Healthcheck, Abbruch des Builds bei geänderter Unit.
 
 ## Offene Punkte
 

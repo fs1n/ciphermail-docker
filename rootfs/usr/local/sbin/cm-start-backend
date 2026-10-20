@@ -1,0 +1,47 @@
+#!/bin/bash
+#
+# Startet ciphermail-backend wie /usr/lib/systemd/system/ciphermail-backend.service.
+# Vorlage: upstream/systemd/ciphermail-backend.service. Ändert sich die Unit in einer neuen
+# CipherMail-Version, bricht der Image-Build ab; dann dieses Skript und die Vorlage nachziehen.
+
+set -euo pipefail
+. /usr/local/lib/ciphermail-docker/service.sh
+
+USER_NAME=ciphermail-backend
+
+# SyslogIdentifier=
+service_log ciphermail-backend
+
+# RuntimeDirectory=, LogsDirectory=
+install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 /run/ciphermail /var/log/ciphermail
+
+# ExecStartPre=+ (als root)
+mkdir -p /var/opt/ciphermail/ciphermail-jms-data
+chown -R "$USER_NAME" /var/opt/ciphermail/
+chmod 750 /var/opt/ciphermail/
+chown -R "$USER_NAME" /etc/ciphermail/pki/tls/private
+chmod 750 /etc/ciphermail/pki/tls/private
+rm -f /run/ciphermail-backend-restart-required
+
+# WorkingDirectory=
+cd /opt/ciphermail/backend
+
+# ExecStart=
+service_exec "$USER_NAME" /usr/bin/java \
+    -XX:MaxRAMPercentage=40 \
+    --add-opens=java.base/java.security=ALL-UNNAMED \
+    -cp '/opt/ciphermail/backend/lib/*' \
+    "-Dciphermail.config.home=/etc/ciphermail" \
+    "-Dspring.profiles.active=" \
+    "-Dciphermail.var.home=/var/opt/ciphermail" \
+    "-Dserver.address=127.0.0.1" \
+    "-Dspring.config.location=classpath:/application.yml,optional:/etc/ciphermail/spring.config.d/*/" \
+    "-Dciphermail.stats.filename=/var/log/ciphermail/ciphermail-stats.log" \
+    "-Dnetworkaddress.cache.ttl=300" \
+    "-Dmail.mime.parameters.strict=false" \
+    "-Dmail.mime.decodetext.strict=false" \
+    "-Dsun.jnu.encoding=UTF-8" \
+    "-Dfile.encoding=UTF-8" \
+    "-Dciphermail.smime.outlook-2010-ski-workaround-enable=false" \
+    "-Dorg.bouncycastle.x509.allow_absent_equiv_NULL=true" \
+    com.ciphermail.james.CipherMailBackendMain

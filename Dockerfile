@@ -59,15 +59,12 @@ FROM ${RUNTIME_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 
-# Kein systemd im Container: Dienste beim Paketinstall nicht starten, systemctl und
-# journalctl durch eigene Skripte ersetzen (auch für die postinst-Skripte der Pakete).
-COPY rootfs/usr/local/sbin/ /usr/local/sbin/
+# Kein systemd im Container: Dienste beim Paketinstall nicht starten. systemctl ist ein
+# minimaler Ersatz (cm-systemctl), nur für cm-system.sh, cm-postfix-map.sh und postinst.
+COPY rootfs/usr/local/ /usr/local/
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod 0755 /usr/sbin/policy-rc.d \
  && chmod 0755 /usr/local/sbin/* \
- && for b in systemctl journalctl; do \
-      dpkg-divert --local --rename --add /usr/bin/$b; \
-      ln -s /usr/local/sbin/cm-$b /usr/bin/$b; \
-    done \
+ && ln -s /usr/local/sbin/cm-systemctl /usr/bin/systemctl \
  && echo "postfix postfix/main_mailer_type select No configuration" | debconf-set-selections
 
 COPY --from=build /src/build/packages/ /tmp/debs/
@@ -82,10 +79,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       /tmp/debs/ciphermail-portal-ui_*_all.deb \
  && rm -rf /var/lib/apt/lists/* /tmp/debs \
  && id ciphermail-backend \
- && test -x /usr/bin/ciphermail-shell
+ && test -x /usr/bin/ciphermail-shell \
+ && if dpkg -s systemd >/dev/null 2>&1; then echo "FEHLER: systemd wurde mitinstalliert" >&2; exit 1; fi
 
-# Erst nach dem Paket installieren, sonst fragt dpkg wegen der geänderten Konfigurationsdatei
-COPY rootfs/etc/supervisor/supervisord.conf /etc/supervisor/supervisord.conf
+# Die Java-Dienste starten cm-start-backend und cm-start-portal-backend mit denselben Befehlen
+# wie die systemd-Units der Pakete. Ändert eine neue CipherMail-Version die Units, bricht der
+# Build hier ab, statt dass der Container still mit veralteten Startbefehlen läuft.
+COPY upstream/systemd/ /opt/ciphermail-docker/upstream/systemd/
+RUN for u in ciphermail-backend ciphermail-portal-backend; do \
+      diff -u /opt/ciphermail-docker/upstream/systemd/$u.service /usr/lib/systemd/system/$u.service \
+      || { echo "FEHLER: systemd-Unit $u hat sich geändert. rootfs/usr/local/sbin/cm-start-* anpassen" \
+                "und upstream/systemd/$u.service aktualisieren." >&2; exit 1; }; \
+    done
+
+# Nach den Paketen: supervisord.conf ersetzt die des Pakets (sonst fragt dpkg nach),
+# spring.config.d/container stellt die Postfix-Steuerung und den Log-Viewer auf eigene Befehle um.
+COPY rootfs/etc/ /etc/
 
 # Postfix wie im README vorbereiten. /etc/postfix ist ein Volume: das Backend schreibt
 # main.cf und maps.d. Die Vorlage in /opt/ciphermail-docker/postfix-seed füllt ein leeres Volume.
@@ -102,12 +111,13 @@ RUN cp /opt/ciphermail/conf/postfix/main.cf /opt/ciphermail/conf/postfix/master.
  && mkdir -p /opt/ciphermail-docker \
  && cp -a /etc/postfix /opt/ciphermail-docker/postfix-seed
 
-# sudoers aus dem README (systemctl/journalctl dahinter sind die Ersatzskripte)
+# sudoers wie im README, aber cm-postfix-control und cm-journalctl statt
+# cm-postfix-ctl.sh und journalctl (siehe spring.config.d/container)
 RUN printf '%s\n' \
       'ciphermail-backend ALL=NOPASSWD: /usr/sbin/cm-postfix-configure-main.sh, \' \
-      '    /usr/sbin/cm-postfix-ctl.sh, /usr/sbin/cm-postfix-map.sh, /usr/sbin/cm-system.sh, \' \
+      '    /usr/local/sbin/cm-postfix-control, /usr/sbin/cm-postfix-map.sh, /usr/sbin/cm-system.sh, \' \
       '    /usr/sbin/postcat, /usr/sbin/postconf, /usr/sbin/postsuper, /usr/sbin/postqueue, \' \
-      '    /usr/bin/journalctl' > /etc/sudoers.d/ciphermail-backend \
+      '    /usr/local/sbin/cm-journalctl' > /etc/sudoers.d/ciphermail-backend \
  && chmod 0440 /etc/sudoers.d/ciphermail-backend \
  && visudo -cf /etc/sudoers.d/ciphermail-backend
 
