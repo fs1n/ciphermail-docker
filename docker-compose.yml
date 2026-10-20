@@ -32,8 +32,32 @@ services:
       DB_HOST: postgres
       DB_PASSWORD: ${DB_PASSWORD}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      KEYSTORE_PASSWORD: ${KEYSTORE_PASSWORD:?KEYSTORE_PASSWORD in .env setzen}
       MYHOSTNAME: ${MYHOSTNAME:-mail.example.com}
       TZ: ${TZ:-Europe/Zurich}
+      # Hinter einem Reverse-Proxy (siehe README)
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      ADMIN_PUBLIC_PORT: ${ADMIN_PUBLIC_PORT:-8443}
+      PORTAL_PUBLIC_PORT: ${PORTAL_PUBLIC_PORT:-443}
+    # Die Java-Dienste nehmen 40 % (Backend) und 20 % (Portal) davon
+    mem_limit: ${MEMORY_LIMIT:-2g}
+    # Härtung: Root-Dateisystem schreibgeschützt, nur nötige Linux-Rechte.
+    # no-new-privileges geht nicht: das Backend braucht sudo (setuid).
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+      - /var/lib/postfix
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN             # Besitzer von Volumes und Konfiguration setzen
+      - DAC_OVERRIDE      # root liest/schreibt Dateien anderer Benutzer (Postfix-Queue, Keys)
+      - FOWNER            # chmod auf Dateien anderer Benutzer
+      - SETUID            # Postfix, Apache, setpriv und sudo wechseln den Benutzer
+      - SETGID
+      - KILL              # supervisord stoppt Dienste anderer Benutzer
+      - NET_BIND_SERVICE  # Ports 25 und 443
     ports:
       - "${SMTP_BIND:-127.0.0.1}:25:25"
       - "${PORTAL_BIND:-127.0.0.1}:443:443"

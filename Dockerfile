@@ -101,6 +101,8 @@ COPY rootfs/etc/ /etc/
 RUN cp /opt/ciphermail/conf/postfix/main.cf /opt/ciphermail/conf/postfix/master.cf /etc/postfix/ \
  && sed -ri 's!^smtp_tls_CApath =.*!smtp_tls_CApath = /etc/ssl/certs!; s/^smtp_tls_CAfile =.*/#smtp_tls_CAfile =/' /etc/postfix/main.cf \
  && postconf -e 'maillog_file = /dev/stdout' \
+ && postconf -e 'compatibility_level = 3.6' 'smtputf8_enable = no' \
+ && sed -i 's/^smtputf8_enable = no$/# Das CipherMail-Backend (Port 10025) bietet kein SMTPUTF8 an: Postfix darf solche Mails\n# nicht annehmen, sonst kommen sie am Content-Filter als Bounce zurück.\nsmtputf8_enable = no/' /etc/postfix/main.cf \
  && mkdir -p /etc/postfix/maps.d \
  && for m in check-recipient-access smtp-sasl-password_maps tls-policy transport-maps virtual-alias-maps; do \
       touch /etc/postfix/maps.d/hash-$m.map; postmap hash:/etc/postfix/maps.d/hash-$m.map; \
@@ -110,6 +112,13 @@ RUN cp /opt/ciphermail/conf/postfix/main.cf /opt/ciphermail/conf/postfix/master.
     done \
  && mkdir -p /opt/ciphermail-docker \
  && cp -a /etc/postfix /opt/ciphermail-docker/postfix-seed
+
+# Was cm-entrypoint bei jedem Start erzeugt, liegt in /run/ciphermail-docker (tmpfs).
+# Diese Links zeigen dorthin; so kann das Root-Dateisystem schreibgeschützt sein.
+RUN ln -s /run/ciphermail-docker/spring/generated /etc/ciphermail/spring.config.d/generated \
+ && mkdir -p /etc/ciphermail/env \
+ && ln -s /run/ciphermail-docker/portal-backend.env /etc/ciphermail/env/portal-backend.env \
+ && ln -s /run/ciphermail-docker/ciphermail-cli /root/.ciphermail-cli
 
 # sudoers wie im README, aber cm-postfix-control und cm-journalctl statt
 # cm-postfix-ctl.sh und journalctl (siehe spring.config.d/container)
@@ -123,8 +132,23 @@ RUN printf '%s\n' \
 
 # Apache: Konfiguration aus dem Quell-Repo (nicht in den .deb enthalten). Sie bringt
 # "Listen 8443" mit, Port 443 (Portal) kommt aus ports.conf. Logs nach stdout/stderr.
+# Zertifikate und weitergegebene Ports kommen aus ciphermail-local.conf, die cm-entrypoint
+# bei jedem Start schreibt (dort auch mod_remoteip für TRUSTED_PROXIES). Jede Ersetzung muss
+# genau einmal greifen, sonst bricht der Build ab (z.B. bei einer geänderten Vorlage).
 COPY --from=build /src/conf/apache/apache.debian.conf /etc/apache2/conf-available/ciphermail.conf
-RUN a2enmod headers proxy proxy_http rewrite ssl socache_shmcb \
+RUN f=/etc/apache2/conf-available/ciphermail.conf \
+ && check() { n=$(grep -cE "$1" $f); [ "$n" = 1 ] || { echo "FEHLER: '$1' kommt in ciphermail.conf ${n}-mal vor statt einmal" >&2; exit 1; }; } \
+ && check '^SSLCertificateFile ' && check '^SSLCertificateKeyFile ' \
+ && check 'RequestHeader set X-Forwarded-Port 443$' && check 'RequestHeader set X-Forwarded-Port 8443$' \
+ && check '^RequestHeader unset X-Forwarded-For$' \
+ && sed -ri \
+      -e 's#^SSLCertificateFile .*#SSLCertificateFile ${CM_UI_TLS_CERT}#' \
+      -e 's#^SSLCertificateKeyFile .*#SSLCertificateKeyFile ${CM_UI_TLS_KEY}#' \
+      -e 's#(RequestHeader set X-Forwarded-Port) 443$#\1 ${CM_PORTAL_PUBLIC_PORT}#' \
+      -e 's#(RequestHeader set X-Forwarded-Port) 8443$#\1 ${CM_ADMIN_PUBLIC_PORT}#' \
+      $f \
+ && sed -i '1i # Vom Container: Zertifikate, öffentliche Ports, vertrauenswürdige Proxys\nInclude /run/ciphermail-docker/apache/ciphermail-local.conf\n' $f \
+ && a2enmod headers proxy proxy_http remoteip rewrite ssl socache_shmcb \
  && a2enconf ciphermail \
  && a2dissite 000-default \
  && echo 'Listen 443' > /etc/apache2/ports.conf \
@@ -133,7 +157,7 @@ RUN a2enmod headers proxy proxy_http rewrite ssl socache_shmcb \
  && ln -sf /dev/stderr /var/log/apache2/error.log \
  && rm -f /etc/ssl/certs/ssl-cert-snakeoil.pem /etc/ssl/private/ssl-cert-snakeoil.key
 
-VOLUME ["/etc/postfix", "/var/spool/postfix", "/var/opt/ciphermail", "/etc/ciphermail/pki/tls/private"]
+VOLUME ["/etc/postfix", "/var/spool/postfix", "/var/opt/ciphermail", "/etc/ciphermail/pki/tls/private", "/var/log/ciphermail"]
 EXPOSE 25 443 8443
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \

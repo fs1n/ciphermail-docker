@@ -1,17 +1,33 @@
 #!/bin/bash
 #
 # Bereitet den Container bei jedem Start vor und startet dann supervisord:
-# Postfix-Volume, TLS-Zertifikate, DB-Konfiguration, DB-Schema (nur beim ersten Start),
-# cli-Konto und Portal-Konfiguration. Rollen und Konten legt danach cm-bootstrap an.
+# Postfix-Volume, TLS-Zertifikate, Apache, DB-Konfiguration, DB-Schema (nur beim ersten Start),
+# Keystore-Passwort, cli-Konto und Portal-Konfiguration. Rollen und Konten legt danach
+# cm-bootstrap an.
+#
+# Alles, was hier bei jedem Start entsteht, liegt unter /run/ciphermail-docker (tmpfs). Das Image
+# verweist mit symbolischen Links dorthin, das Root-Dateisystem kann darum schreibgeschützt sein.
 
 set -euo pipefail
+umask 022
 
 log() { echo "cm-entrypoint: $*"; }
 die() { echo "cm-entrypoint: FEHLER: $*" >&2; exit 1; }
 
+# Selbstsigniertes Server-Zertifikat (Ersatz, wenn keines gemountet ist): selfsigned <name> <key> <crt>
+selfsigned() {
+    (umask 077; openssl req -x509 -newkey rsa:3072 -nodes -days 3650 -subj "/CN=$1" \
+        -addext "basicConstraints=critical,CA:FALSE" -addext "subjectAltName=DNS:$1" \
+        -addext "keyUsage=critical,digitalSignature,keyEncipherment" -addext "extendedKeyUsage=serverAuth" \
+        -keyout "$2" -out "$3" 2>/dev/null)
+}
+
+GEN=/run/ciphermail-docker
+BACKEND_USER=ciphermail-backend
+
 # ---------- Einstellungen ----------
 # Secrets auch aus Dateien (Docker-/Kubernetes-Secrets): VAR_FILE=/pfad statt VAR=wert
-for v in DB_PASSWORD ADMIN_PASSWORD CLI_PASSWORD PORTAL_PASSWORD; do
+for v in DB_PASSWORD ADMIN_PASSWORD CLI_PASSWORD PORTAL_PASSWORD KEYSTORE_PASSWORD; do
     f=${v}_FILE
     if [[ -n ${!f:-} ]]; then
         [[ -z ${!v:-} ]] || die "$v und $f sind beide gesetzt"
@@ -22,12 +38,12 @@ for v in DB_PASSWORD ADMIN_PASSWORD CLI_PASSWORD PORTAL_PASSWORD; do
     fi
 done
 
-: "${DB_HOST:?DB_HOST fehlt}"
-: "${DB_PASSWORD:?DB_PASSWORD fehlt}"
+[[ -n ${DB_HOST:-} ]] || die "DB_HOST fehlt"
+[[ -n ${DB_PASSWORD:-} ]] || die "DB_PASSWORD fehlt"
 DB_PORT=${DB_PORT:-5432}
 DB_NAME=${DB_NAME:-ciphermail}
 DB_USER=${DB_USER:-ciphermail}
-DB_JDBC_PARAMS=${DB_JDBC_PARAMS:-}   # z.B. "sslmode=require"
+DB_JDBC_PARAMS=${DB_JDBC_PARAMS:-}   # z.B. "sslmode=verify-full"
 JDBC="jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}${DB_JDBC_PARAMS:+?$DB_JDBC_PARAMS}"
 
 # cli und portal sind Maschinenkonten: Passwort zufällig und mindestens 32 Zeichen.
@@ -36,10 +52,27 @@ CLI_PASSWORD=${CLI_PASSWORD:-$(openssl rand -hex 24)}
 PORTAL_PASSWORD=${PORTAL_PASSWORD:-$(openssl rand -hex 24)}
 (( ${#CLI_PASSWORD} >= 32 )) || die "CLI_PASSWORD braucht mindestens 32 Zeichen"
 (( ${#PORTAL_PASSWORD} >= 32 )) || die "PORTAL_PASSWORD braucht mindestens 32 Zeichen"
-export CLI_PASSWORD PORTAL_PASSWORD
+
+# Reverse-Proxy: Adressen, denen X-Forwarded-For geglaubt wird, und die öffentlichen Ports
+TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
+ADMIN_PUBLIC_PORT=${ADMIN_PUBLIC_PORT:-8443}
+PORTAL_PUBLIC_PORT=${PORTAL_PUBLIC_PORT:-443}
+[[ $ADMIN_PUBLIC_PORT =~ ^[0-9]{1,5}$ ]] || die "ADMIN_PUBLIC_PORT ist keine Portnummer"
+[[ $PORTAL_PUBLIC_PORT =~ ^[0-9]{1,5}$ ]] || die "PORTAL_PUBLIC_PORT ist keine Portnummer"
+proxies=()
+for p in ${TRUSTED_PROXIES//,/ }; do
+    [[ $p =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]] || die "TRUSTED_PROXIES: '$p' ist keine IP-Adresse bzw. kein Netz"
+    proxies+=("$p")
+done
+
+# Keystore-Passwort (Prüfung gegen die Datenbank weiter unten)
+[[ -n ${KEYSTORE_PASSWORD:-} ]] || die "KEYSTORE_PASSWORD fehlt (z.B. openssl rand -base64 32, gut aufbewahren, nie ändern)"
+(( ${#KEYSTORE_PASSWORD} >= 16 )) || die "KEYSTORE_PASSWORD braucht mindestens 16 Zeichen"
 
 export PGPASSWORD=$DB_PASSWORD
-BACKEND_USER=ciphermail-backend
+
+install -d -m 0755 "$GEN" "$GEN/apache" /run/lock
+install -d -m 0750 -g "$BACKEND_USER" "$GEN/spring" "$GEN/spring/generated"
 
 # ---------- Postfix ----------
 SEED=/opt/ciphermail-docker/postfix-seed
@@ -58,7 +91,6 @@ for m in /etc/postfix/maps.d/hash-{check-recipient-access,smtp-sasl-password_map
     [[ -f $m ]] || touch "$m"
     [[ -f $m.db ]] || postmap "hash:$m"
 done
-[[ ! -f /etc/aliases || -f /etc/aliases.db ]] || newaliases
 
 if [[ -n ${POSTFIX_TLS_FILE:-} ]]; then
     [[ -r $POSTFIX_TLS_FILE ]] || die "POSTFIX_TLS_FILE $POSTFIX_TLS_FILE nicht lesbar"
@@ -66,49 +98,50 @@ if [[ -n ${POSTFIX_TLS_FILE:-} ]]; then
 elif [[ ! -f /etc/postfix/tls.cer ]]; then
     log "kein Postfix-Zertifikat, erzeuge selbstsigniertes (POSTFIX_TLS_FILE setzen!)"
     tmp=$(mktemp -d)
-    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=${MYHOSTNAME:-$(hostname -f)}" \
-        -keyout "$tmp/key" -out "$tmp/crt" 2>/dev/null
-    cat "$tmp/crt" "$tmp/key" > /etc/postfix/tls.cer
-    chmod 0600 /etc/postfix/tls.cer
+    selfsigned "${MYHOSTNAME:-$(hostname -f)}" "$tmp/key" "$tmp/crt"
+    (umask 077; cat "$tmp/crt" "$tmp/key" > /etc/postfix/tls.cer)
     rm -rf "$tmp"
 fi
+# data_directory (master.lock, TLS-Cache); bei read-only Root ein tmpfs
+install -d -m 0755 -o postfix -g postfix /var/lib/postfix
 # Legt fehlende Verzeichnisse in /var/spool/postfix an (leeres Volume)
 postfix check || true
 
 # ---------- Apache (Admin-UI 8443, Portal 443) ----------
-UI_TLS_CERT_FILE=${UI_TLS_CERT_FILE:-/etc/ssl/certs/ssl-cert-snakeoil.pem}
-UI_TLS_KEY_FILE=${UI_TLS_KEY_FILE:-/etc/ssl/private/ssl-cert-snakeoil.key}
-if [[ $UI_TLS_CERT_FILE == /etc/ssl/certs/ssl-cert-snakeoil.pem && ! -f $UI_TLS_CERT_FILE ]]; then
+# ciphermail.conf bindet $GEN/apache/ciphermail-local.conf ein (siehe Dockerfile)
+if [[ -n ${UI_TLS_CERT_FILE:-} || -n ${UI_TLS_KEY_FILE:-} ]]; then
+    [[ -r ${UI_TLS_CERT_FILE:-} && -r ${UI_TLS_KEY_FILE:-} ]] \
+        || die "UI_TLS_CERT_FILE und UI_TLS_KEY_FILE müssen beide gesetzt und lesbar sein"
+    ui_cert=$UI_TLS_CERT_FILE ui_key=$UI_TLS_KEY_FILE
+else
     log "kein UI-Zertifikat, erzeuge selbstsigniertes (UI_TLS_CERT_FILE/UI_TLS_KEY_FILE setzen!)"
-    make-ssl-cert generate-default-snakeoil --force-overwrite
+    ui_cert=$GEN/apache/ui.crt ui_key=$GEN/apache/ui.key
+    selfsigned "$(hostname -f)" "$ui_key" "$ui_cert"
 fi
-[[ -r $UI_TLS_CERT_FILE && -r $UI_TLS_KEY_FILE ]] || die "UI-Zertifikat $UI_TLS_CERT_FILE / $UI_TLS_KEY_FILE nicht lesbar"
-sed -ri \
-    -e "s#^SSLCertificateFile .*#SSLCertificateFile $UI_TLS_CERT_FILE#" \
-    -e "s#^SSLCertificateKeyFile .*#SSLCertificateKeyFile $UI_TLS_KEY_FILE#" \
-    /etc/apache2/conf-available/ciphermail.conf
+[[ $ui_cert$ui_key != *[[:space:]\"]* ]] || die "Pfade der UI-Zertifikate dürfen keine Leerzeichen enthalten"
+
+{
+    echo "# Erzeugt von cm-entrypoint bei jedem Start"
+    echo "Define CM_UI_TLS_CERT $ui_cert"
+    echo "Define CM_UI_TLS_KEY $ui_key"
+    echo "Define CM_ADMIN_PUBLIC_PORT $ADMIN_PUBLIC_PORT"
+    echo "Define CM_PORTAL_PUBLIC_PORT $PORTAL_PUBLIC_PORT"
+    if (( ${#proxies[@]} )); then
+        # mod_remoteip übernimmt die Client-Adresse aus X-Forwarded-For nur von diesen Proxys.
+        # Danach verwirft ciphermail.conf den Header wie gehabt, und mod_proxy setzt ihn neu
+        # mit der so ermittelten Client-Adresse für die Backends.
+        echo "RemoteIPHeader X-Forwarded-For"
+        echo "RemoteIPInternalProxy ${proxies[*]}"
+    fi
+} > "$GEN/apache/ciphermail-local.conf"
+if (( ${#proxies[@]} )); then log "Reverse-Proxy vertraut: ${proxies[*]}"; fi
 
 # ---------- Backend-Konfiguration ----------
 yaml() { local s=${1//\'/\'\'}; printf "'%s'" "$s"; }   # YAML-String in einfachen Anführungszeichen
 
-install -d -m 0755 /etc/ciphermail/spring.config.d/postgres
-cat > /etc/ciphermail/spring.config.d/postgres/application.yml <<EOF
----
-ciphermail:
-  hibernate:
-    connection:
-      url: $(yaml "$JDBC")
-      username: $(yaml "$DB_USER")
-      password: $(yaml "$DB_PASSWORD")
-EOF
-chown root:"$BACKEND_USER" /etc/ciphermail/spring.config.d/postgres/application.yml
-chmod 0640 /etc/ciphermail/spring.config.d/postgres/application.yml
-
-install -d -m 0750 -o "$BACKEND_USER" -g "$BACKEND_USER" /var/opt/ciphermail /etc/ciphermail/pki/tls/private
-
 # ---------- Datenbank ----------
 log "warte auf PostgreSQL $DB_HOST:$DB_PORT"
-for i in $(seq 1 ${DB_WAIT_SECONDS:-120}); do
+for i in $(seq 1 "${DB_WAIT_SECONDS:-120}"); do
     pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -q && break
     (( i % 10 == 0 )) && log "PostgreSQL noch nicht bereit"
     sleep 1
@@ -128,24 +161,71 @@ if [[ $tables == 0 ]]; then
     rm -f "$tmp"
 fi
 
+# ---------- Keystore-Passwort ----------
+# Verschlüsselt die privaten Schlüssel in cm_key_store. CipherMail setzt standardmässig keines.
+# Es darf sich nie ändern: mit einem anderen Passwort sind die gespeicherten Schlüssel unlesbar.
+# Darum liegt ein Prüfwert (PBKDF2) im eigenen Schema ciphermail_docker derselben Datenbank.
+pbkdf2() {  # pbkdf2 <salt-hex> <iterationen>, Passwort über stdin
+    python3 -I -c 'import hashlib,sys; print(hashlib.pbkdf2_hmac("sha256", sys.stdin.buffer.read(), bytes.fromhex(sys.argv[1]), int(sys.argv[2])).hex())' "$1" "$2"
+}
+psql_q -c "create schema if not exists ciphermail_docker" \
+       -c "create table if not exists ciphermail_docker.state (key text primary key, value text not null)"
+verifier=$(psql_q -c "select value from ciphermail_docker.state where key = 'keystore-password'")
+if [[ -z $verifier ]]; then
+    keys=$(psql_q -c "select count(*) from cm_key_store where cm_encoded_key is not null")
+    (( keys == 0 )) || die "Die Datenbank enthält schon $keys private Schlüssel, aber kein bekanntes Keystore-Passwort." \
+        "Sie wurden mit dem bisherigen Passwort gespeichert (Standard: leer). Ein neues Passwort würde sie unlesbar machen."
+    salt=$(openssl rand -hex 16)
+    hash=$(printf '%s' "$KEYSTORE_PASSWORD" | pbkdf2 "$salt" 600000)
+    psql_q -c "insert into ciphermail_docker.state values ('keystore-password', 'pbkdf2-sha256\$600000\$$salt\$$hash')"
+    log "Keystore-Passwort festgelegt"
+else
+    IFS='$' read -r algo iter salt hash <<< "$verifier"
+    [[ $algo == pbkdf2-sha256 ]] || die "unbekanntes Format des Keystore-Prüfwerts"
+    [[ $(printf '%s' "$KEYSTORE_PASSWORD" | pbkdf2 "$salt" "$iter") == "$hash" ]] \
+        || die "KEYSTORE_PASSWORD stimmt nicht mit dem Passwort überein, mit dem die Schlüssel gespeichert sind." \
+               "Es darf nie geändert werden."
+fi
+
+# Spring-Konfiguration für das Backend (spring.config.d/generated zeigt hierher)
+cat > "$GEN/spring/generated/application.yml" <<EOF
+---
+# Erzeugt von cm-entrypoint bei jedem Start
+ciphermail:
+  hibernate:
+    connection:
+      url: $(yaml "$JDBC")
+      username: $(yaml "$DB_USER")
+      password: $(yaml "$DB_PASSWORD")
+  keystore:
+    password: $(yaml "$KEYSTORE_PASSWORD")
+EOF
+chown root:"$BACKEND_USER" "$GEN/spring/generated/application.yml"
+chmod 0640 "$GEN/spring/generated/application.yml"
+
+install -d -m 0750 -o "$BACKEND_USER" -g "$BACKEND_USER" /var/opt/ciphermail /etc/ciphermail/pki/tls/private
+
 # ---------- cli-Konto ----------
 log "setze cli-Konto"
 cm-admin-db-tool --admin-name cli --admin-password "$CLI_PASSWORD" --password-encoding system \
     --db-username "$DB_USER" --db-password "$DB_PASSWORD" --db-url "$JDBC" \
     --db-driver-class org.postgresql.Driver --ip-addresses 127.0.0.1 --set-admin-credentials
-umask 077
-printf 'CIPHERMAIL_SHELL_USERNAME=cli\nCIPHERMAIL_SHELL_PASSWORD=%s\n' "$CLI_PASSWORD" > /root/.ciphermail-cli
-chmod 0600 /root/.ciphermail-cli
+# /root/.ciphermail-cli zeigt hierher
+(umask 077; printf 'CIPHERMAIL_SHELL_USERNAME=cli\nCIPHERMAIL_SHELL_PASSWORD=%s\n' "$CLI_PASSWORD" > "$GEN/ciphermail-cli")
 
 # ---------- Portal-Backend ----------
-install -d -m 0755 /etc/ciphermail/env
-cat > /etc/ciphermail/env/portal-backend.env <<EOF
+# /etc/ciphermail/env/portal-backend.env zeigt hierher
+(umask 077; cat > "$GEN/portal-backend.env" <<EOF
 CIPHERMAIL_PORTAL_REST_CLIENT_USERNAME=portal
 CIPHERMAIL_PORTAL_REST_CLIENT_PASSWORD=$PORTAL_PASSWORD
 CIPHERMAIL_PORTAL_REST_CLIENT_BASE_URL=http://127.0.0.1:8081
 EOF
-chmod 0600 /etc/ciphermail/env/portal-backend.env
-umask 022
+)
+
+# Was die Dienste nicht brauchen, nicht an supervisord weitergeben. cm-bootstrap braucht
+# PORTAL_PASSWORD und ADMIN_PASSWORD; die Java-Dienste bekommen ohnehin eine leere Umgebung.
+export PORTAL_PASSWORD
+unset DB_PASSWORD PGPASSWORD KEYSTORE_PASSWORD CLI_PASSWORD
 
 log "Vorbereitung fertig"
 exec "$@"
