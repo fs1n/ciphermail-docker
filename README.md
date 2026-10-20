@@ -185,6 +185,10 @@ Start mit falschem Keystore-Passwort, ohne Prüfwert bei vorhandenen Schlüsseln
 Passwort bricht ab. Hinter Caddy: echte Client-Adresse kommt an, gefälschtes `X-Forwarded-For`
 wird über den Proxy, direkt und aus anderen Containern ignoriert, Allowlist für das Admin-UI.
 
+Deb-only-Build (`build/build-debs.xml`): alle fünf Pakete mit derselben Version wie
+`build-packages`, Paket-Schritt ca. 9 statt ca. 20 Minuten (4 Kerne, 15 GB RAM, ohne Cache);
+Image startet, Mail läuft durch den Filter, Healthcheck grün.
+
 ## Offene Punkte
 
 - **Upgrades:** ob eine neue CipherMail-Version das DB-Schema selbst anpasst, ist nicht geklärt.
