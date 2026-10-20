@@ -1,0 +1,139 @@
+#!/bin/bash
+#
+# Bereitet den Container bei jedem Start vor und startet dann supervisord:
+# Postfix-Volume, TLS-Zertifikate, DB-Konfiguration, DB-Schema (nur beim ersten Start),
+# cli-Konto und Portal-Konfiguration. Rollen und Konten legt danach cm-bootstrap an.
+
+set -euo pipefail
+
+log() { echo "cm-entrypoint: $*"; }
+die() { echo "cm-entrypoint: FEHLER: $*" >&2; exit 1; }
+
+# ---------- Einstellungen ----------
+: "${DB_HOST:?DB_HOST fehlt}"
+: "${DB_PASSWORD:?DB_PASSWORD fehlt}"
+DB_PORT=${DB_PORT:-5432}
+DB_NAME=${DB_NAME:-ciphermail}
+DB_USER=${DB_USER:-ciphermail}
+DB_JDBC_PARAMS=${DB_JDBC_PARAMS:-}   # z.B. "sslmode=require"
+JDBC="jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}${DB_JDBC_PARAMS:+?$DB_JDBC_PARAMS}"
+
+# cli und portal sind Maschinenkonten: Passwort zufällig und mindestens 32 Zeichen.
+# Beide werden bei jedem Start neu gesetzt, darum genügt ein zufälliges Passwort pro Start.
+CLI_PASSWORD=${CLI_PASSWORD:-$(openssl rand -hex 24)}
+PORTAL_PASSWORD=${PORTAL_PASSWORD:-$(openssl rand -hex 24)}
+(( ${#CLI_PASSWORD} >= 32 )) || die "CLI_PASSWORD braucht mindestens 32 Zeichen"
+(( ${#PORTAL_PASSWORD} >= 32 )) || die "PORTAL_PASSWORD braucht mindestens 32 Zeichen"
+export CLI_PASSWORD PORTAL_PASSWORD
+
+export PGPASSWORD=$DB_PASSWORD
+BACKEND_USER=ciphermail-backend
+
+# ---------- Postfix ----------
+SEED=/opt/ciphermail-docker/postfix-seed
+if [[ ! -f /etc/postfix/main.cf ]]; then
+    log "leeres /etc/postfix, kopiere Grundkonfiguration"
+    cp -a "$SEED/." /etc/postfix/
+    [[ -z ${MYHOSTNAME:-} ]] || postconf -e "ciphermail_myhostname = $MYHOSTNAME"
+fi
+# Dateien, die zur Postfix-Version gehören, immer aus dem Image nehmen
+for f in dynamicmaps.cf dynamicmaps.cf.d postfix-files postfix-files.d; do
+    [[ -e $SEED/$f ]] && { rm -rf "/etc/postfix/$f"; cp -a "$SEED/$f" "/etc/postfix/$f"; }
+done
+mkdir -p /etc/postfix/maps.d
+for m in /etc/postfix/maps.d/hash-{check-recipient-access,smtp-sasl-password_maps,tls-policy,transport-maps,virtual-alias-maps}.map \
+         /etc/postfix/system-{check-recipient-access,transport-maps}; do
+    [[ -f $m ]] || touch "$m"
+    [[ -f $m.db ]] || postmap "hash:$m"
+done
+[[ ! -f /etc/aliases || -f /etc/aliases.db ]] || newaliases
+
+if [[ -n ${POSTFIX_TLS_FILE:-} ]]; then
+    [[ -r $POSTFIX_TLS_FILE ]] || die "POSTFIX_TLS_FILE $POSTFIX_TLS_FILE nicht lesbar"
+    install -m 0600 -o root -g root "$POSTFIX_TLS_FILE" /etc/postfix/tls.cer
+elif [[ ! -f /etc/postfix/tls.cer ]]; then
+    log "kein Postfix-Zertifikat, erzeuge selbstsigniertes (POSTFIX_TLS_FILE setzen!)"
+    tmp=$(mktemp -d)
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=${MYHOSTNAME:-$(hostname -f)}" \
+        -keyout "$tmp/key" -out "$tmp/crt" 2>/dev/null
+    cat "$tmp/crt" "$tmp/key" > /etc/postfix/tls.cer
+    chmod 0600 /etc/postfix/tls.cer
+    rm -rf "$tmp"
+fi
+# Legt fehlende Verzeichnisse in /var/spool/postfix an (leeres Volume)
+postfix check || true
+
+# ---------- Apache (Admin-UI 8443, Portal 443) ----------
+UI_TLS_CERT_FILE=${UI_TLS_CERT_FILE:-/etc/ssl/certs/ssl-cert-snakeoil.pem}
+UI_TLS_KEY_FILE=${UI_TLS_KEY_FILE:-/etc/ssl/private/ssl-cert-snakeoil.key}
+if [[ $UI_TLS_CERT_FILE == /etc/ssl/certs/ssl-cert-snakeoil.pem && ! -f $UI_TLS_CERT_FILE ]]; then
+    log "kein UI-Zertifikat, erzeuge selbstsigniertes (UI_TLS_CERT_FILE/UI_TLS_KEY_FILE setzen!)"
+    make-ssl-cert generate-default-snakeoil --force-overwrite
+fi
+[[ -r $UI_TLS_CERT_FILE && -r $UI_TLS_KEY_FILE ]] || die "UI-Zertifikat $UI_TLS_CERT_FILE / $UI_TLS_KEY_FILE nicht lesbar"
+sed -ri \
+    -e "s#^SSLCertificateFile .*#SSLCertificateFile $UI_TLS_CERT_FILE#" \
+    -e "s#^SSLCertificateKeyFile .*#SSLCertificateKeyFile $UI_TLS_KEY_FILE#" \
+    /etc/apache2/conf-available/ciphermail.conf
+
+# ---------- Backend-Konfiguration ----------
+yaml() { local s=${1//\'/\'\'}; printf "'%s'" "$s"; }   # YAML-String in einfachen Anführungszeichen
+
+install -d -m 0755 /etc/ciphermail/spring.config.d/postgres
+cat > /etc/ciphermail/spring.config.d/postgres/application.yml <<EOF
+---
+ciphermail:
+  hibernate:
+    connection:
+      url: $(yaml "$JDBC")
+      username: $(yaml "$DB_USER")
+      password: $(yaml "$DB_PASSWORD")
+EOF
+chown root:"$BACKEND_USER" /etc/ciphermail/spring.config.d/postgres/application.yml
+chmod 0640 /etc/ciphermail/spring.config.d/postgres/application.yml
+
+install -d -m 0750 -o "$BACKEND_USER" -g "$BACKEND_USER" /var/opt/ciphermail /etc/ciphermail/pki/tls/private
+
+# ---------- Datenbank ----------
+log "warte auf PostgreSQL $DB_HOST:$DB_PORT"
+for i in $(seq 1 ${DB_WAIT_SECONDS:-120}); do
+    pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -q && break
+    (( i % 10 == 0 )) && log "PostgreSQL noch nicht bereit"
+    sleep 1
+done
+pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -q || die "PostgreSQL nicht erreichbar"
+
+psql_q() { psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -Atq "$@"; }
+
+tables=$(psql_q -c "select count(*) from information_schema.tables where table_schema = current_schema()")
+if [[ $tables == 0 ]]; then
+    log "leere Datenbank, lege Schema an"
+    tmp=$(mktemp)
+    /opt/ciphermail/scripts/cm-generate-db-schema.sh --output-file "$tmp" \
+        --database-user "$DB_USER" --database-password "$DB_PASSWORD" \
+        --database-connection-url "$JDBC" --database-driver-class org.postgresql.Driver
+    psql_q -1 -f "$tmp"
+    rm -f "$tmp"
+fi
+
+# ---------- cli-Konto ----------
+log "setze cli-Konto"
+cm-admin-db-tool --admin-name cli --admin-password "$CLI_PASSWORD" --password-encoding system \
+    --db-username "$DB_USER" --db-password "$DB_PASSWORD" --db-url "$JDBC" \
+    --db-driver-class org.postgresql.Driver --ip-addresses 127.0.0.1 --set-admin-credentials
+umask 077
+printf 'CIPHERMAIL_SHELL_USERNAME=cli\nCIPHERMAIL_SHELL_PASSWORD=%s\n' "$CLI_PASSWORD" > /root/.ciphermail-cli
+chmod 0600 /root/.ciphermail-cli
+
+# ---------- Portal-Backend ----------
+install -d -m 0755 /etc/ciphermail/env
+cat > /etc/ciphermail/env/portal-backend.env <<EOF
+CIPHERMAIL_PORTAL_REST_CLIENT_USERNAME=portal
+CIPHERMAIL_PORTAL_REST_CLIENT_PASSWORD=$PORTAL_PASSWORD
+CIPHERMAIL_PORTAL_REST_CLIENT_BASE_URL=http://127.0.0.1:8081
+EOF
+chmod 0600 /etc/ciphermail/env/portal-backend.env
+umask 022
+
+log "Vorbereitung fertig"
+exec "$@"

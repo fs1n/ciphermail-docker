@@ -1,0 +1,54 @@
+#!/bin/bash
+#
+# Ersatz für journald: liest Logzeilen von stdin, gibt sie unverändert auf stdout aus
+# (docker logs / kubectl logs) und hängt sie zusätzlich als JSON an
+# /var/log/ciphermail/journal/<name>.jsonl an. Daraus liest cm-journalctl für den
+# Log-Viewer im Admin-UI.
+#
+# Aufruf: cm-journal <name> [plain|syslog]
+#   plain:  jede Zeile hat den Bezeichner <name>, Priorität aus "ERROR"/"WARN"/... am Zeilenanfang
+#   syslog: Zeilen im Format "Mon dd hh:mm:ss host prog[pid]: text" (Postfix maillog_file)
+
+name=${1:?Aufruf: cm-journal <name> [plain|syslog]}
+mode=${2:-plain}
+dir=/var/log/ciphermail/journal
+file=$dir/$name.jsonl
+max=$(( ${CM_JOURNAL_MAX_MB:-20} * 1024 * 1024 ))
+
+# Nicht abbrechen, falls das Log nicht schreibbar ist: stdout ist wichtiger
+mkdir -p "$dir" 2>/dev/null
+size=$(stat -c %s "$file" 2>/dev/null || echo 0)
+exec 3>>"$file" || exec 3>/dev/null
+
+re_syslog='^[A-Z][a-z]{2} +[0-9]+ [0-9:]{8} [^ ]+ ([^:[ ]+)(\[[0-9]+\])?: (.*)$'
+prio=6
+while IFS= read -r line || [[ -n $line ]]; do
+    printf '%s\n' "$line"
+
+    id=$name msg=$line
+    if [[ $mode == syslog ]]; then
+        prio=6
+        if [[ $line =~ $re_syslog ]]; then id=${BASH_REMATCH[1]} msg=${BASH_REMATCH[3]}; fi
+    fi
+    case $msg in
+        ERROR*|FATAL*|fatal:*|panic:*|error:*) prio=3 ;;
+        WARN*|warning:*) prio=4 ;;
+        INFO*) prio=6 ;;
+        DEBUG*|TRACE*) prio=7 ;;
+    esac
+
+    # JSON-Escaping ohne externe Prozesse
+    msg=${msg//\\/\\\\}; msg=${msg//\"/\\\"}; msg=${msg//$'\t'/\\t}; msg=${msg//[[:cntrl:]]/}
+    id=${id//\\/}; id=${id//\"/}
+    ts=${EPOCHREALTIME/[.,]/}
+    out="{\"__REALTIME_TIMESTAMP\":\"$ts\",\"SYSLOG_IDENTIFIER\":\"$id\",\"PRIORITY\":\"$prio\",\"MESSAGE\":\"$msg\"}"
+    printf '%s\n' "$out" >&3
+
+    size=$(( size + ${#out} + 1 ))
+    if (( size > max )); then
+        exec 3>&-
+        mv -f "$file" "$file.1" 2>/dev/null
+        exec 3>>"$file" || exec 3>/dev/null
+        size=0
+    fi
+done

@@ -1,0 +1,67 @@
+#!/bin/bash
+#
+# journalctl-Ersatz für den Log-Viewer im Admin-UI (wird als /usr/bin/journalctl installiert).
+# Das Backend ruft z.B. auf:
+#   sudo journalctl --unit=postfix --output=json --output-fields=MESSAGE,SYSLOG_IDENTIFIER,PRIORITY
+#                   --reverse --grep=foo --lines=1000 --since=... --until=...
+# Quelle sind die Dateien von cm-journal. Ausgabe: eine JSON-Zeile pro Eintrag.
+
+set -uo pipefail
+
+dir=/var/log/ciphermail/journal
+units=() idents=() names=() reverse=false grep= lines= since= until=
+
+for a in "$@"; do
+    case $a in
+        --unit=*|-u=*) u=${a#*=}; u=${u%.service}; u=${u%%@*}; units+=("$u"); names+=("$u") ;;
+        --identifier=*|-t=*) i=${a#*=}; idents+=("$i"); names+=("${i%%/*}") ;;
+        --reverse|-r) reverse=true ;;
+        --grep=*|-g=*) grep=${a#*=} ;;
+        --lines=*|-n=*) lines=${a#*=} ;;
+        --since=*|-S=*) since=${a#*=} ;;
+        --until=*|-U=*) until=${a#*=} ;;
+        *) ;;  # --output, --output-fields, --no-pager usw.
+    esac
+done
+
+files=()
+for n in $(printf '%s\n' "${names[@]}" | sort -u); do
+    [[ $n =~ ^[A-Za-z0-9_.-]+$ ]] || continue
+    for f in "$dir/$n.jsonl.1" "$dir/$n.jsonl"; do [[ -r $f ]] && files+=("$f"); done
+done
+(( ${#files[@]} )) || exit 0
+
+to_micro() {
+    [[ -z $1 ]] && { echo null; return; }
+    local s
+    s=$(date -d "$1" +%s%6N 2>/dev/null) && echo "$s" || echo null
+}
+
+# journalctl --grep: Gross-/Kleinschreibung egal, solange das Muster keine Grossbuchstaben hat
+flags=
+[[ -n $grep && $grep != *[[:upper:]]* ]] && flags=i
+
+ids_json=$(printf '%s\n' "${idents[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+units_json=$(printf '%s\n' "${units[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+
+jq -cR \
+    --argjson units "$units_json" \
+    --argjson ids "$ids_json" \
+    --arg grep "$grep" --arg flags "$flags" \
+    --argjson since "$(to_micro "$since")" \
+    --argjson until "$(to_micro "$until")" '
+    (input_filename | split("/") | last | sub("\\.jsonl(\\.1)?$"; "")) as $file
+    | fromjson?
+    | select(type == "object")
+    # wie journalctl: passende Unit ODER passender Bezeichner
+    | .SYSLOG_IDENTIFIER as $id
+    | select(any($units[]; . == $file) or any($ids[]; . == $id))
+    | select($grep == "" or ((.MESSAGE // "") | test($grep; $flags)))
+    | select($since == null or ((.__REALTIME_TIMESTAMP | tonumber) >= $since))
+    | select($until == null or ((.__REALTIME_TIMESTAMP | tonumber) <= $until))
+    ' "${files[@]}" 2>/dev/null \
+| sort -s -t'"' -k4,4n \
+| if [[ $lines =~ ^[0-9]+$ ]]; then tail -n "$lines"; else cat; fi \
+| if $reverse; then tac; else cat; fi
+
+exit 0

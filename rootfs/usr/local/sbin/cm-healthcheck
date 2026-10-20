@@ -1,0 +1,16 @@
+#!/bin/bash
+#
+# Gesund, wenn alle Dienste laufen und Backend (REST 8081, SMTP 10025) und Postfix (25) Verbindungen annehmen.
+
+set -u
+
+for p in postfix ciphermail-backend ciphermail-portal-backend apache2; do
+    supervisorctl -c /etc/supervisor/supervisord.conf status "$p" 2>/dev/null | grep -q ' RUNNING ' \
+        || { echo "$p läuft nicht"; exit 1; }
+done
+
+for port in 25 8081 10025; do
+    timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" 2>/dev/null \
+        || { echo "Port $port antwortet nicht"; exit 1; }
+done
+exit 0

@@ -1,0 +1,55 @@
+# CipherMail Community Gateway mit PostgreSQL, zum lokalen Testen und als Vorlage.
+# Vorher: cp .env.example .env und Werte setzen.
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ciphermail
+      POSTGRES_USER: ciphermail
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD in .env setzen}
+      LANG: C.UTF-8
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ciphermail -d ciphermail"]
+      interval: 10s
+      retries: 10
+
+  ciphermail:
+    build:
+      context: .
+      args:
+        CM_REF: ${CM_REF:-6.5.0}
+    image: ${CM_IMAGE:-ciphermail-gateway}:${CM_REF:-6.5.0}
+    hostname: ${MYHOSTNAME:-mail.example.com}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PASSWORD: ${DB_PASSWORD}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      MYHOSTNAME: ${MYHOSTNAME:-mail.example.com}
+      TZ: ${TZ:-Europe/Zurich}
+    ports:
+      - "${SMTP_BIND:-127.0.0.1}:25:25"
+      - "${PORTAL_BIND:-127.0.0.1}:443:443"
+      # Admin-UI nie offen ins Internet
+      - "127.0.0.1:8443:8443"
+    volumes:
+      - postfix-etc:/etc/postfix
+      - postfix-spool:/var/spool/postfix
+      - ciphermail-var:/var/opt/ciphermail
+      - ciphermail-tls:/etc/ciphermail/pki/tls/private
+      - ciphermail-log:/var/log/ciphermail
+
+volumes:
+  pgdata:
+  postfix-etc:
+  postfix-spool:
+  ciphermail-var:
+  ciphermail-tls:
+  ciphermail-log:

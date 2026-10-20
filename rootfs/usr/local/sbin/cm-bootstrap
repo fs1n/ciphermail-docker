@@ -1,0 +1,74 @@
+#!/bin/bash
+#
+# Läuft als supervisord-Programm, sobald das Backend antwortet. Legt an, was das README
+# von Hand anlegt: Rolle und Konto "portal" (bei jedem Start, Passwort aus der Umgebung)
+# sowie das erste Admin-Konto (nur wenn es noch nicht existiert).
+# Endet mit 0 bei Erfolg; sonst startet supervisord es nach kurzer Pause neu.
+
+set -uo pipefail
+export HOME=/root
+
+log() { echo "cm-bootstrap: $*"; }
+fail() { echo "cm-bootstrap: FEHLER: $*" >&2; sleep 10; exit 1; }
+cli() { ciphermail-cli "$@"; }
+
+log "warte auf Backend"
+for i in $(seq 1 150); do
+    cli system ping >/dev/null 2>&1 && break
+    sleep 2
+done
+cli system ping >/dev/null 2>&1 || fail "Backend antwortet nicht"
+
+# ---------- Portal ----------
+cli auth role get --name portal >/dev/null 2>&1 \
+    || cli auth role create --name portal \
+    || fail "Rolle portal anlegen"
+cli auth role permissions set --name portal --permissions \
+    portal:portal-change-portal-password \
+    portal:portal-forgot-password \
+    portal:portal-get-otp-json-code \
+    portal:portal-get-otp-qr-code \
+    portal:portal-get-otp-secret-key \
+    portal:portal-get-otp-secret-key-qr-code \
+    portal:portal-get-pdf-password \
+    portal:portal-get-pdf-reply-parameters \
+    portal:portal-get-portal-token \
+    portal:portal-get-portal-properties \
+    portal:portal-reset-portal-password \
+    portal:portal-set-2fa-enabled \
+    portal:portal-set-2fa-secret \
+    portal:portal-set-portal-signup-password \
+    portal:portal-validate-portal-password-reset \
+    portal:portal-validate-signup \
+    >/dev/null || fail "Rechte der Rolle portal setzen"
+
+cli auth admin get --name portal >/dev/null 2>&1 \
+    || cli auth admin add --name portal --authentication-type username-password \
+    || fail "Konto portal anlegen"
+cli auth admin password --name portal --password "$PORTAL_PASSWORD" --password-encoding system \
+    || fail "Passwort für portal setzen"
+cli auth admin ip-addresses set --name portal --ip-addresses 127.0.0.1 >/dev/null || fail "IP für portal setzen"
+cli auth admin roles set --name portal --roles portal >/dev/null || fail "Rolle für portal setzen"
+log "Konto portal bereit"
+
+# ---------- Erster Admin ----------
+ADMIN_NAME=${ADMIN_NAME:-admin}
+if cli auth admin get --name "$ADMIN_NAME" >/dev/null 2>&1; then
+    log "Admin $ADMIN_NAME existiert, keine Änderung"
+elif [[ -z ${ADMIN_PASSWORD:-} ]]; then
+    log "WARNUNG: kein Admin $ADMIN_NAME und kein ADMIN_PASSWORD gesetzt, Admin-UI ohne Login"
+else
+    cli auth admin add --name "$ADMIN_NAME" --authentication-type username-password \
+        || fail "Admin $ADMIN_NAME anlegen"
+    if ! cli auth admin password --name "$ADMIN_NAME" --password "$ADMIN_PASSWORD"; then
+        # Sonst bliebe ein Admin ohne Passwort zurück und würde nie mehr angelegt
+        cli auth admin delete --name "$ADMIN_NAME" >/dev/null 2>&1
+        log "ADMIN_PASSWORD abgelehnt (mind. 12 Zeichen, keine Wiederholungen/Tastaturfolgen, nicht den Kontonamen)"
+        exit 0
+    fi
+    cli auth admin roles set --name "$ADMIN_NAME" --roles admin >/dev/null || fail "Rolle für $ADMIN_NAME setzen"
+    log "Admin $ADMIN_NAME angelegt"
+fi
+
+log "fertig"
+exit 0
