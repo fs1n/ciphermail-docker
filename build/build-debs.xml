@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Baut nur die .deb-Pakete der CipherMail Community Gateway, ohne RPMs.
+
+    Ersetzt "ant build-packages" aus build.xml des Gateway-Repos. Das Dockerfile kopiert diese
+    Datei neben build.xml; wie dort holt get-versions-from-git Version und Zeitstempel einmal aus
+    dem Gateway-Repo und gibt sie an die Teil-Builds weiter (Properties werden vererbt), damit
+    die Pakete dieselbe Version tragen wie bei build-packages.
+-->
+<project name="ciphermail-docker-debs" default="build-debs">
+
+    <import file="build.xml"/>
+
+    <target name="build-debs" depends="clean, get-versions-from-git"
+            description="Nur die .deb-Pakete bauen (Backend, Portal-Backend, CLI, Admin-UI, Portal-UI)">
+
+        <ant antfile="build.xml" dir="ciphermail-community-backend">
+            <target name="build-backend-deb"/>
+            <target name="build-portal-backend-deb"/>
+            <target name="build-cli-deb"/>
+        </ant>
+
+        <ant antfile="build.xml" dir="ciphermail-community-ui">
+            <property name="common.path" value="../ciphermail-community-backend/common.xml"/>
+            <target name="build-admin-ui-deb"/>
+            <target name="build-portal-ui-deb"/>
+        </ant>
+
+        <copy todir="${ciphermail.packages-path}">
+            <fileset dir="ciphermail-community-backend/${ciphermail.packages-path}" includes="**/*.deb"/>
+            <fileset dir="ciphermail-community-ui/${ciphermail.packages-path}" includes="**/*.deb"/>
+            <flattenmapper/>
+        </copy>
+    </target>
+</project>

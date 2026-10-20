@@ -22,10 +22,11 @@ ARG GRAALVM_SHA256=ebac1dd96a5e0fbcd1dd9804fa58815f146390a40aae966f02a8c26d19743
 
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 
-# Build-Abhängigkeiten wie im README bzw. Vagrantfile (Trixie hat kein openjdk-17 mehr)
+# Build-Abhängigkeiten wie im README bzw. Vagrantfile (Trixie hat kein openjdk-17 mehr),
+# ohne rpm und createrepo-c: gebaut werden nur die .deb-Pakete
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ant ant-contrib build-essential ca-certificates createrepo-c curl debhelper \
-      dpkg-dev fakeroot gcc git make maven openjdk-21-jdk rpm xz-utils zlib1g-dev \
+      ant ant-contrib build-essential ca-certificates curl debhelper \
+      dpkg-dev fakeroot gcc git make maven openjdk-21-jdk xz-utils zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSLo /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
@@ -46,13 +47,18 @@ WORKDIR /src
 RUN git clone --recurse-submodules --branch "${CM_REF}" \
       https://gitlab.com/ciphermail/ciphermail-community-gateway.git .
 
+# Nur die .deb-Pakete bauen (statt "ant build-packages", das auch RPMs baut).
 # GraalVM braucht viel Speicher (Vagrant-Build-VM: 16 GB)
+COPY build/build-debs.xml /src/build-debs.xml
 RUN --mount=type=cache,target=/root/.m2 \
     --mount=type=cache,target=/root/.npm \
     --mount=type=cache,target=/root/.cache \
     --mount=type=cache,target=/root/.yarn \
-    ant build-packages \
- && ls -l build/packages/*.deb
+    ant -f build-debs.xml build-debs \
+ && ls -l build/packages/ \
+ && for p in ciphermail-gateway-backend ciphermail-gateway-portal-backend ciphermail-cli ciphermail-admin-ui ciphermail-portal-ui; do \
+      ls build/packages/${p}_*_all.deb >/dev/null || { echo "FEHLER: Paket $p fehlt" >&2; exit 1; }; \
+    done
 
 # ---------- Stage 2: Runtime ----------
 FROM ${RUNTIME_IMAGE}

@@ -23,6 +23,12 @@ Admin-UI: <https://localhost:8443>, Login mit `admin` und `ADMIN_PASSWORD`.
 Der Build lädt Node.js und GraalVM als x64-Tarball und läuft darum nur für `linux/amd64`.
 Version per Build-Argument `CM_REF` (Release-Tag, Standard `6.5.0`).
 
+Gebaut werden nur die fünf `.deb`-Pakete (`build/build-debs.xml`), nicht wie mit
+`ant build-packages` zusätzlich die RPMs. Der Paket-Build (Maven, Yarn, GraalVM native-image
+für die CLI) braucht beim ersten Mal 20 Minuten und mehr; danach liegt er im Docker-Cache
+und läuft erst wieder bei einem anderen `CM_REF`. Docker sollte dafür 12–16 GB RAM haben,
+sonst swappt GraalVM und es dauert ein Vielfaches.
+
 ## Aufbau
 
 Im Container gibt es kein systemd und kein journald. CipherMail ist für eine VM damit gebaut:
