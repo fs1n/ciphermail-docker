@@ -10,6 +10,18 @@ log() { echo "cm-entrypoint: $*"; }
 die() { echo "cm-entrypoint: FEHLER: $*" >&2; exit 1; }
 
 # ---------- Einstellungen ----------
+# Secrets auch aus Dateien (Docker-/Kubernetes-Secrets): VAR_FILE=/pfad statt VAR=wert
+for v in DB_PASSWORD ADMIN_PASSWORD CLI_PASSWORD PORTAL_PASSWORD; do
+    f=${v}_FILE
+    if [[ -n ${!f:-} ]]; then
+        [[ -z ${!v:-} ]] || die "$v und $f sind beide gesetzt"
+        [[ -r ${!f} ]] || die "$f: ${!f} nicht lesbar"
+        printf -v "$v" '%s' "$(< "${!f}")"
+        export "$v"
+        unset "$f"
+    fi
+done
+
 : "${DB_HOST:?DB_HOST fehlt}"
 : "${DB_PASSWORD:?DB_PASSWORD fehlt}"
 DB_PORT=${DB_PORT:-5432}

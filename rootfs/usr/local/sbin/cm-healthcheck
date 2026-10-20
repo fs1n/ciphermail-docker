@@ -1,6 +1,7 @@
 #!/bin/bash
 #
-# Gesund, wenn alle Dienste laufen und Backend (REST 8081, SMTP 10025) und Postfix (25) Verbindungen annehmen.
+# Gesund, wenn alle Dienste laufen, der Postfix-Master lebt und die REST-API des Backends (8081)
+# Verbindungen annimmt. Port 25 wird bewusst nicht geprüft (jede Prüfung landet im Mail-Log).
 
 set -u
 
@@ -9,7 +10,9 @@ for p in postfix ciphermail-backend ciphermail-portal-backend apache2; do
         || { echo "$p läuft nicht"; exit 1; }
 done
 
-for port in 25 8081 10025; do
+/usr/sbin/postfix status >/dev/null 2>&1 || { echo "Postfix-Master läuft nicht"; exit 1; }
+
+for port in 8081; do
     timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" 2>/dev/null \
         || { echo "Port $port antwortet nicht"; exit 1; }
 done

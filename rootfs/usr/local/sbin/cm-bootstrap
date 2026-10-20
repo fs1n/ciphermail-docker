@@ -11,6 +11,8 @@ export HOME=/root
 log() { echo "cm-bootstrap: $*"; }
 fail() { echo "cm-bootstrap: FEHLER: $*" >&2; sleep 10; exit 1; }
 cli() { ciphermail-cli "$@"; }
+# "get" endet auch bei unbekannten Namen mit 0, liefert dann aber keine Ausgabe
+exists() { [[ -n $(ciphermail-cli auth "$1" get --name "$2" 2>/dev/null) ]]; }
 
 log "warte auf Backend"
 for i in $(seq 1 150); do
@@ -20,7 +22,7 @@ done
 cli system ping >/dev/null 2>&1 || fail "Backend antwortet nicht"
 
 # ---------- Portal ----------
-cli auth role get --name portal >/dev/null 2>&1 \
+exists role portal \
     || cli auth role create --name portal \
     || fail "Rolle portal anlegen"
 cli auth role permissions set --name portal --permissions \
@@ -42,7 +44,7 @@ cli auth role permissions set --name portal --permissions \
     portal:portal-validate-signup \
     >/dev/null || fail "Rechte der Rolle portal setzen"
 
-cli auth admin get --name portal >/dev/null 2>&1 \
+exists admin portal \
     || cli auth admin add --name portal --authentication-type username-password \
     || fail "Konto portal anlegen"
 cli auth admin password --name portal --password "$PORTAL_PASSWORD" --password-encoding system \
@@ -53,7 +55,7 @@ log "Konto portal bereit"
 
 # ---------- Erster Admin ----------
 ADMIN_NAME=${ADMIN_NAME:-admin}
-if cli auth admin get --name "$ADMIN_NAME" >/dev/null 2>&1; then
+if exists admin "$ADMIN_NAME"; then
     log "Admin $ADMIN_NAME existiert, keine Änderung"
 elif [[ -z ${ADMIN_PASSWORD:-} ]]; then
     log "WARNUNG: kein Admin $ADMIN_NAME und kein ADMIN_PASSWORD gesetzt, Admin-UI ohne Login"

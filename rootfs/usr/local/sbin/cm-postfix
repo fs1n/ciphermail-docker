@@ -1,0 +1,29 @@
+#!/bin/bash
+#
+# Startet Postfix im Vordergrund für supervisord.
+#
+# "postfix start-fg" startet den Master nur dann direkt, wenn es PID 1 ist. Sonst läuft er
+# als "master -s" in einer eigenen Session, die supervisord beim Stoppen nicht erreicht:
+# "systemctl restart postfix" aus dem Backend würde dann scheitern ("already running").
+# Darum: bei SIGTERM/SIGINT selbst "postfix stop" aufrufen.
+
+exec > >(exec /usr/local/sbin/cm-journal postfix syslog) 2>&1
+
+# Übrig gebliebenen Master (z.B. nach Absturz dieses Skripts) zuerst beenden
+if /usr/sbin/postfix status >/dev/null 2>&1; then
+    /usr/sbin/postfix stop
+fi
+
+stop() {
+    /usr/sbin/postfix stop
+    wait "$pid"
+    exit 0
+}
+trap stop TERM INT
+
+/usr/sbin/postfix start-fg &
+pid=$!
+wait "$pid"
+rc=$?
+# wait kehrt auch bei einem Signal zurück; dann läuft stop() bereits
+exit $rc

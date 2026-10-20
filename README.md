@@ -60,13 +60,16 @@ und `journalctl` für den Log-Viewer auf. Darum:
 | `CLI_PASSWORD`, `PORTAL_PASSWORD` | nein | Maschinenkonten, mind. 32 Zeichen. Ohne: zufällig bei jedem Start |
 | `TZ`, `JAVA_TOOL_OPTIONS` | nein | werden an die Java-Dienste weitergegeben |
 
+Alle Passwörter gehen auch als Datei: `DB_PASSWORD_FILE`, `ADMIN_PASSWORD_FILE`,
+`CLI_PASSWORD_FILE`, `PORTAL_PASSWORD_FILE` (z.B. `/run/secrets/db_password`).
+
 ## Persistente Daten
 
 | Pfad | Inhalt |
 |------|--------|
 | `/etc/postfix` | Postfix-Konfiguration. Das Backend schreibt `main.cf` und `maps.d`. Ein leeres Volume wird beim Start befüllt. |
 | `/var/spool/postfix` | Mail-Queue |
-| `/var/opt/ciphermail` | Arbeitsdaten des Backends (JMS-Queue mit Mails in Verarbeitung) |
+| `/var/opt/ciphermail` | Arbeitsdaten des Backends: JMS-Queue mit Mails in Verarbeitung, Fehler-Repository (`james/`) |
 | `/etc/ciphermail/pki/tls/private` | TLS-Schlüssel und CSRs aus dem Admin-UI |
 | `/var/log/ciphermail` | optional: Logs für den Log-Viewer, Statistik |
 | PostgreSQL | alles andere (Einstellungen, Schlüssel, Zertifikate, Quarantäne) |
@@ -83,12 +86,16 @@ Aufrufe der CLI im Container: `docker compose exec ciphermail ciphermail-cli sys
 - Früh prüfen, ob der Anbieter Port 25 ausgehend sperrt.
 - PostgreSQL extern, z.B. CloudNativePG.
 
+## Getestet
+
+Mit 6.5.0 (Build und Betrieb mit Compose): leere DB und zweiter Start, Login im Admin-UI,
+Portal, Mail über Port 25 durch den Content-Filter und zurück (10025 → 10026),
+`cm-postfix-ctl.sh restart|stop|start` und `postfix reload` über sudo wie aus dem Backend,
+Log-Viewer für MTA, Backend und Portal, Healthcheck.
+
 ## Offene Punkte
 
 - **Upgrades:** ob eine neue CipherMail-Version das DB-Schema selbst anpasst, ist nicht geklärt.
   Vor einem Upgrade DB sichern und die Release Notes lesen.
-- **Fehler-Repository von James:** `mailetcontainer.xml` nennt `file://var/mail/error/`
-  (relativ zum Arbeitsverzeichnis des Backends). Falls dort Mails landen, gehört der Pfad
-  ebenfalls auf ein Volume.
 - `X-Forwarded-For` wird von Apache verworfen (Vorgabe von CipherMail). Hinter einem
   Reverse-Proxy `conf-available/ciphermail.conf` anpassen.

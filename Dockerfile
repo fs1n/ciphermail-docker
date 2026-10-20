@@ -61,7 +61,7 @@ ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 
 # Kein systemd im Container: Dienste beim Paketinstall nicht starten, systemctl und
 # journalctl durch eigene Skripte ersetzen (auch für die postinst-Skripte der Pakete).
-COPY rootfs/ /
+COPY rootfs/usr/local/sbin/ /usr/local/sbin/
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod 0755 /usr/sbin/policy-rc.d \
  && chmod 0755 /usr/local/sbin/* \
  && for b in systemctl journalctl; do \
@@ -83,6 +83,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/* /tmp/debs \
  && id ciphermail-backend \
  && test -x /usr/bin/ciphermail-shell
+
+# Erst nach dem Paket installieren, sonst fragt dpkg wegen der geänderten Konfigurationsdatei
+COPY rootfs/etc/supervisor/supervisord.conf /etc/supervisor/supervisord.conf
 
 # Postfix wie im README vorbereiten. /etc/postfix ist ein Volume: das Backend schreibt
 # main.cf und maps.d. Die Vorlage in /opt/ciphermail-docker/postfix-seed füllt ein leeres Volume.
