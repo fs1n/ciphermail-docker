@@ -71,7 +71,7 @@ done
 
 export PGPASSWORD=$DB_PASSWORD
 
-install -d -m 0755 "$GEN" "$GEN/apache" /run/lock
+install -d -m 0755 "$GEN" "$GEN/apache" "$GEN/apache/admin-vhost.d" /run/lock
 install -d -m 0750 -g "$BACKEND_USER" "$GEN/spring" "$GEN/spring/generated"
 
 # ---------- Postfix ----------
@@ -134,6 +134,21 @@ fi
         echo "RemoteIPInternalProxy ${proxies[*]}"
     fi
 } > "$GEN/apache/ciphermail-local.conf"
+
+# API-Dokumentation (Swagger UI und OpenAPI) des Backends, nur auf dem Admin-UI (8443).
+# Das Backend verlangt dafür einen Login: im selben Browser zuerst im Admin-UI anmelden.
+rm -f "$GEN/apache/admin-vhost.d/"*.conf
+case ${API_DOCS:-false} in
+    true|1|yes)
+        printf '%s\n' \
+            'ProxyPass /swagger-ui http://127.0.0.1:8081/swagger-ui' \
+            'ProxyPass /v3/api-docs http://127.0.0.1:8081/v3/api-docs' \
+            > "$GEN/apache/admin-vhost.d/api-docs.conf"
+        log "API-Dokumentation unter /swagger-ui/index.html (Admin-UI)"
+        ;;
+    false|0|no|"") ;;
+    *) die "API_DOCS muss true oder false sein" ;;
+esac
 if (( ${#proxies[@]} )); then log "Reverse-Proxy vertraut: ${proxies[*]}"; fi
 
 # ---------- Backend-Konfiguration ----------

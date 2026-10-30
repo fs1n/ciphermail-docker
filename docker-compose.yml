@@ -39,6 +39,8 @@ services:
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       ADMIN_PUBLIC_PORT: ${ADMIN_PUBLIC_PORT:-8443}
       PORTAL_PUBLIC_PORT: ${PORTAL_PUBLIC_PORT:-443}
+      # Swagger UI der REST-API unter /swagger-ui/index.html (nur Admin-UI)
+      API_DOCS: ${API_DOCS:-false}
     # Die Java-Dienste nehmen 40 % (Backend) und 20 % (Portal) davon
     mem_limit: ${MEMORY_LIMIT:-2g}
     # Härtung: Root-Dateisystem schreibgeschützt, nur nötige Linux-Rechte.

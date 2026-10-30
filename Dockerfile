@@ -147,11 +147,13 @@ RUN f=/etc/apache2/conf-available/ciphermail.conf \
  && check '^SSLCertificateFile ' && check '^SSLCertificateKeyFile ' \
  && check 'RequestHeader set X-Forwarded-Port 443$' && check 'RequestHeader set X-Forwarded-Port 8443$' \
  && check '^RequestHeader unset X-Forwarded-For$' \
+ && check '^    ProxyPass /api http://127.0.0.1:8081/api$' \
  && sed -ri \
       -e 's#^SSLCertificateFile .*#SSLCertificateFile ${CM_UI_TLS_CERT}#' \
       -e 's#^SSLCertificateKeyFile .*#SSLCertificateKeyFile ${CM_UI_TLS_KEY}#' \
       -e 's#(RequestHeader set X-Forwarded-Port) 443$#\1 ${CM_PORTAL_PUBLIC_PORT}#' \
       -e 's#(RequestHeader set X-Forwarded-Port) 8443$#\1 ${CM_ADMIN_PUBLIC_PORT}#' \
+      -e 's#^(    ProxyPass /api http://127.0.0.1:8081/api)$#    \# Zusätze nur für das Admin-UI (z.B. API_DOCS), von cm-entrypoint\n    IncludeOptional /run/ciphermail-docker/apache/admin-vhost.d/*.conf\n\1#' \
       $f \
  && sed -i '1i # Vom Container: Zertifikate, öffentliche Ports, vertrauenswürdige Proxys\nInclude /run/ciphermail-docker/apache/ciphermail-local.conf\n' $f \
  && a2enmod headers proxy proxy_http remoteip rewrite ssl socache_shmcb \

@@ -76,6 +76,7 @@ Die Umstellung steht in `rootfs/etc/ciphermail/spring.config.d/container/applica
 | `UI_TLS_CERT_FILE`, `UI_TLS_KEY_FILE` | empfohlen | Zertifikat für 443/8443. Ohne: selbstsigniert, bei jedem Start neu |
 | `TRUSTED_PROXIES` | hinter Proxy | IPs/Netze des Reverse-Proxys, durch Komma oder Leerzeichen getrennt (siehe unten) |
 | `ADMIN_PUBLIC_PORT`, `PORTAL_PUBLIC_PORT` | hinter Proxy | Öffentliche Ports von Admin-UI und Portal, Standard `8443` und `443` |
+| `API_DOCS` | nein | `true`: Swagger UI der REST-API im Admin-UI (siehe REST-API) |
 | `MEMORY_LIMIT` | nein | nur Compose: Speicherlimit des Containers, Standard `2g` |
 | `CLI_PASSWORD`, `PORTAL_PASSWORD` | nein | Maschinenkonten, mind. 32 Zeichen. Ohne: zufällig bei jedem Start |
 | `TZ`, `JAVA_TOOL_OPTIONS` | nein | werden an die Java-Dienste weitergegeben |
@@ -109,7 +110,7 @@ Neue Werte in `.env` gelten erst, wenn der Container neu erstellt wird
 | `POSTFIX_TLS_FILE`, `UI_TLS_CERT_FILE`, `UI_TLS_KEY_FILE` | übernommen (Datei wird jedes Mal kopiert bzw. eingetragen). Variable entfernen lässt das zuletzt kopierte Postfix-Zertifikat stehen. |
 | `CLI_PASSWORD`, `PORTAL_PASSWORD` | übernommen (werden ohnehin bei jedem Start gesetzt) |
 | `TZ`, `JAVA_TOOL_OPTIONS` | übernommen |
-| `TRUSTED_PROXIES`, `ADMIN_PUBLIC_PORT`, `PORTAL_PUBLIC_PORT`, `MEMORY_LIMIT` | übernommen |
+| `TRUSTED_PROXIES`, `ADMIN_PUBLIC_PORT`, `PORTAL_PUBLIC_PORT`, `API_DOCS`, `MEMORY_LIMIT` | übernommen |
 | `KEYSTORE_PASSWORD` | **nie ändern.** Ein anderer Wert bricht den Start ab. |
 | `ADMIN_PASSWORD` | **ignoriert**, sobald der Admin existiert. Passwort im Admin-UI oder mit `ciphermail-cli auth admin password` ändern. |
 | `MYHOSTNAME` | **ignoriert** nach dem ersten Start. Im Admin-UI (MTA-Einstellungen) ändern, dort gehört es CipherMail. |
@@ -134,6 +135,45 @@ Mit `read_only` (siehe Härtung) braucht es zusätzlich tmpfs für `/run`, `/tmp
 Apache-Einstellungen, Passwortdateien), liegt in `/run/ciphermail-docker`.
 
 Aufrufe der CLI im Container: `docker compose exec ciphermail ciphermail-cli system ping`.
+
+## REST-API
+
+Alles, was das Admin-UI kann, geht auch über die REST-API des Backends, erreichbar wie das
+Admin-UI unter `https://<admin-ui>/api/...`.
+
+**Dokumentation (Swagger UI):** `API_DOCS=true` setzen, dann im Browser zuerst im Admin-UI
+anmelden und `https://<admin-ui>/swagger-ui/index.html` öffnen. Nur auf dem Admin-UI (8443),
+nie auf dem Portal. Ohne `API_DOCS` landen diese Pfade im Admin-UI («Das hat nicht geklappt»).
+
+**Aus Skripten:** Basic Auth mit einem eigenen Benutzer. Schreibende Aufrufe brauchen ein
+CSRF-Token, das sich der Client selbst ausdenkt und zweimal mitschickt (Header und Cookie):
+
+```bash
+T=$(openssl rand -hex 16)
+curl -u 'domain-sync:…' -H "X-XSRF-TOKEN: $T" -b "XSRF-TOKEN=$T" \
+     -X POST "https://<admin-ui>/api/domain/addDomain?domain=example.ch"
+```
+
+**Eigener Benutzer mit wenigen Rechten**, z.B. zum Abgleichen von Domains:
+
+```bash
+docker compose exec ciphermail bash -c '
+ciphermail-cli auth role create --name domain-sync
+ciphermail-cli auth role permissions set --name domain-sync --permissions \
+  domain:get-domains domain:add-domain domain:delete-domain domain:is-domain-in-use \
+  property:get:domain:locality property:set:domain:locality \
+  mta:get-standard-settings mta:set-standard-settings
+ciphermail-cli auth admin add --name domain-sync --authentication-type username-password
+ciphermail-cli auth admin password --name domain-sync --password "…"
+ciphermail-cli auth admin roles set --name domain-sync --roles domain-sync
+ciphermail-cli auth admin ip-addresses set --name domain-sync --ip-addresses <IP>'
+```
+
+Für eine eigene Domain braucht es drei Aufrufe: `POST /api/domain/addDomain?domain=…`,
+`POST /api/property/setDomainProperty?domain=…&name=locality` mit Body `INTERNAL`
+(`text/plain`; sonst gilt die Domain als fremd) und `POST /api/mta/setStandardSettings` mit
+der **vollständigen** Liste `relayDomains` (sowie `internalRelayHosts` = Mailserver,
+`externalRelayHosts`, `myNetworks`).
 
 ## Härtung
 
