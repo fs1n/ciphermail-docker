@@ -1,5 +1,3 @@
-# Ansible managed
-
 [Unit]
 Description=CipherMail back-end
 Documentation=https://www.ciphermail.com/documentation
